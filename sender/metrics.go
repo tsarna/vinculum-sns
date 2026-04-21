@@ -20,8 +20,8 @@ type SenderMetrics struct {
 
 // NewSenderMetrics creates sender metrics from a MeterProvider. Returns
 // a noop-backed instance if mp is nil. clientName is the vinculum client
-// block name, topicName is the SNS topic name.
-func NewSenderMetrics(clientName, topicName string, mp metric.MeterProvider) *SenderMetrics {
+// block name.
+func NewSenderMetrics(clientName string, mp metric.MeterProvider) *SenderMetrics {
 	if mp == nil {
 		mp = noop.NewMeterProvider()
 	}
@@ -44,29 +44,32 @@ func NewSenderMetrics(clientName, topicName string, mp metric.MeterProvider) *Se
 		batchMessageCount: batchSize,
 		baseAttrs: metric.WithAttributes(
 			attribute.String("messaging.system", "aws_sns"),
-			attribute.String("messaging.destination.name", topicName),
 			attribute.String("vinculum.client.name", clientName),
 		),
 	}
 }
 
-func (m *SenderMetrics) RecordSent(ctx context.Context) {
-	if m == nil {
-		return
-	}
-	m.messagesSent.Add(ctx, 1, m.baseAttrs)
+func topicAttr(topic string) metric.MeasurementOption {
+	return metric.WithAttributes(attribute.String("messaging.destination.name", topic))
 }
 
-func (m *SenderMetrics) RecordOperationDuration(ctx context.Context, d time.Duration) {
+func (m *SenderMetrics) RecordSent(ctx context.Context, destName string) {
 	if m == nil {
 		return
 	}
-	m.operationDuration.Record(ctx, d.Seconds(), m.baseAttrs)
+	m.messagesSent.Add(ctx, 1, m.baseAttrs, topicAttr(destName))
 }
 
-func (m *SenderMetrics) RecordBatchSize(ctx context.Context, size int) {
+func (m *SenderMetrics) RecordOperationDuration(ctx context.Context, d time.Duration, destName string) {
 	if m == nil {
 		return
 	}
-	m.batchMessageCount.Record(ctx, float64(size), m.baseAttrs)
+	m.operationDuration.Record(ctx, d.Seconds(), m.baseAttrs, topicAttr(destName))
+}
+
+func (m *SenderMetrics) RecordBatchSize(ctx context.Context, size int, destName string) {
+	if m == nil {
+		return
+	}
+	m.batchMessageCount.Record(ctx, float64(size), m.baseAttrs, topicAttr(destName))
 }

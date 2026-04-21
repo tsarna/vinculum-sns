@@ -46,6 +46,14 @@ type SNSPublishAPI interface {
 	Publish(ctx context.Context, params *sns.PublishInput, optFns ...func(*sns.Options)) (*sns.PublishOutput, error)
 }
 
+// TopicFunc resolves the SNS target value per message. It receives the
+// vinculum topic, message, and fields, and returns the target value string
+// (an ARN or phone number).
+type TopicFunc func(topic string, msg any, fields map[string]string) (string, error)
+
+// SubjectFunc resolves the SNS Subject per message.
+type SubjectFunc func(topic string, msg any, fields map[string]string) (string, error)
+
 // SNSSender receives vinculum bus events and publishes them to AWS SNS.
 // It implements bus.Subscriber so it can be used directly as a subscription target.
 type SNSSender struct {
@@ -57,6 +65,10 @@ type SNSSender struct {
 	staticTarget   string // resolved target value (when constant)
 	topicProperty  string // "TopicArn", "TargetArn", or "PhoneNumber" (when static)
 	topicName      string // human-readable name extracted from ARN (when static)
+	topicFn        TopicFunc // per-message target resolver (nil when static or passthrough)
+	passthrough    bool      // true = use vinculum topic as SNS target value
+	subjectFn      SubjectFunc // per-message subject (nil = no default)
+	msgStructure   string // static message_structure config ("" = omit)
 	topicAttribute string // "" = don't include
 	metrics        *SenderMetrics
 	logger         *zap.Logger
@@ -85,12 +97,29 @@ func (s *SNSSender) OnEvent(ctx context.Context, topic string, msg any, fields m
 	// Serialize payload.
 	body, err := s.wireFormat.SerializeString(msg)
 	if err != nil {
-		return fmt.Errorf("sns sender %s: serialize: %w", s.topicName, err)
+		return fmt.Errorf("sns sender %s: serialize: %w", s.clientName, err)
 	}
 
-	// Extract $CamelCase fields as SNS properties.
+	// Resolve target value and property.
+	targetValue, targetProperty, destName, err := s.resolveTargetForMessage(topic, msg, fields)
+	if err != nil {
+		return fmt.Errorf("sns sender %s: %w", s.clientName, err)
+	}
+
+	// Resolve Subject: $Subject field > subjectFn > omit.
 	subject := extractField(fields, "$Subject")
+	if subject == "" && s.subjectFn != nil {
+		subject, err = s.subjectFn(topic, msg, fields)
+		if err != nil {
+			return fmt.Errorf("sns sender %s: subject: %w", s.clientName, err)
+		}
+	}
+
+	// Resolve MessageStructure: $MessageStructure field > msgStructure config > omit.
 	msgStructure := extractField(fields, "$MessageStructure")
+	if msgStructure == "" {
+		msgStructure = s.msgStructure
+	}
 
 	// Build message attributes from non-$ fields.
 	attrs := s.buildMessageAttributes(fields, topic)
@@ -101,11 +130,11 @@ func (s *SNSSender) OnEvent(ctx context.Context, topic string, msg any, fields m
 	propagator.Inject(ctx, carrier)
 
 	// Start tracing span.
-	ctx, span := s.tracer().Start(ctx, "publish "+s.topicName,
+	ctx, span := s.tracer().Start(ctx, "publish "+destName,
 		trace.WithSpanKind(trace.SpanKindProducer),
 		trace.WithAttributes(
 			attribute.String("messaging.system", "aws_sns"),
-			attribute.String("messaging.destination.name", s.topicName),
+			attribute.String("messaging.destination.name", destName),
 			attribute.String("messaging.operation.type", "publish"),
 			attribute.String("vinculum.client.name", s.clientName),
 		),
@@ -119,13 +148,13 @@ func (s *SNSSender) OnEvent(ctx context.Context, topic string, msg any, fields m
 	}
 
 	// Set target property.
-	switch s.topicProperty {
+	switch targetProperty {
 	case PropertyTopicArn:
-		input.TopicArn = &s.staticTarget
+		input.TopicArn = &targetValue
 	case PropertyTargetArn:
-		input.TargetArn = &s.staticTarget
+		input.TargetArn = &targetValue
 	case PropertyPhoneNumber:
-		input.PhoneNumber = &s.staticTarget
+		input.PhoneNumber = &targetValue
 	}
 
 	// Set optional properties.
@@ -141,16 +170,42 @@ func (s *SNSSender) OnEvent(ctx context.Context, topic string, msg any, fields m
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return fmt.Errorf("sns sender %s: publish: %w", s.topicName, err)
+		return fmt.Errorf("sns sender %s: publish: %w", s.clientName, err)
 	}
 
 	if result.MessageId != nil {
 		span.SetAttributes(attribute.String("messaging.message.id", *result.MessageId))
 	}
 
-	s.metrics.RecordSent(ctx)
-	s.metrics.RecordOperationDuration(ctx, time.Since(start))
+	s.metrics.RecordSent(ctx, destName)
+	s.metrics.RecordOperationDuration(ctx, time.Since(start), destName)
 	return nil
+}
+
+// resolveTargetForMessage returns the target value, property type, and
+// display name for a message. Uses static target, topicFn, or passthrough.
+func (s *SNSSender) resolveTargetForMessage(topic string, msg any, fields map[string]string) (value, property, name string, err error) {
+	// Static target (most common path).
+	if s.staticTarget != "" {
+		return s.staticTarget, s.topicProperty, s.topicName, nil
+	}
+
+	// Dynamic target via topicFn or passthrough.
+	var raw string
+	if s.topicFn != nil {
+		raw, err = s.topicFn(topic, msg, fields)
+		if err != nil {
+			return "", "", "", fmt.Errorf("sns_topic expression: %w", err)
+		}
+	} else if s.passthrough {
+		raw = topic
+	}
+
+	property, name, err = ResolveTarget(raw)
+	if err != nil {
+		return "", "", "", err
+	}
+	return raw, property, name, nil
 }
 
 // buildMessageAttributes converts vinculum fields to SNS message attributes.

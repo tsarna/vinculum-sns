@@ -259,6 +259,7 @@ func TestBuilder_Validation(t *testing.T) {
 	// Missing target.
 	_, err = NewSender().
 		WithClient(mock).
+		WithClientName("test").
 		Build()
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "target is required")
@@ -311,4 +312,238 @@ func TestOnEvent_BaseSubscriberNoOps(t *testing.T) {
 	// These should be no-ops from BaseSubscriber.
 	assert.NoError(t, s.OnSubscribe(context.Background(), "test"))
 	assert.NoError(t, s.OnUnsubscribe(context.Background(), "test"))
+}
+
+// --- Phase 2: Dynamic target, passthrough, subject, message_structure ---
+
+func TestOnEvent_DynamicTopic(t *testing.T) {
+	mock := &mockSNS{messageID: "msg-1"}
+	s, err := NewSender().
+		WithClient(mock).
+		WithClientName("dynamic").
+		WithTopicFunc(func(topic string, msg any, fields map[string]string) (string, error) {
+			return "arn:aws:sns:us-east-1:123456789012:" + topic, nil
+		}).
+		Build()
+	require.NoError(t, err)
+
+	err = s.OnEvent(context.Background(), "alerts", "msg", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "arn:aws:sns:us-east-1:123456789012:alerts", *mock.publishInput.TopicArn)
+	assert.Nil(t, mock.publishInput.TargetArn)
+	assert.Nil(t, mock.publishInput.PhoneNumber)
+}
+
+func TestOnEvent_DynamicTopic_TargetArn(t *testing.T) {
+	mock := &mockSNS{messageID: "msg-1"}
+	s, err := NewSender().
+		WithClient(mock).
+		WithClientName("dynamic").
+		WithTopicFunc(func(topic string, msg any, fields map[string]string) (string, error) {
+			return "arn:aws:sns:us-east-1:123456789012:endpoint/GCM/myapp/abc123", nil
+		}).
+		Build()
+	require.NoError(t, err)
+
+	err = s.OnEvent(context.Background(), "notify", "msg", nil)
+	require.NoError(t, err)
+	assert.Nil(t, mock.publishInput.TopicArn)
+	assert.Equal(t, "arn:aws:sns:us-east-1:123456789012:endpoint/GCM/myapp/abc123", *mock.publishInput.TargetArn)
+}
+
+func TestOnEvent_DynamicTopic_PhoneNumber(t *testing.T) {
+	mock := &mockSNS{messageID: "msg-1"}
+	s, err := NewSender().
+		WithClient(mock).
+		WithClientName("dynamic").
+		WithTopicFunc(func(topic string, msg any, fields map[string]string) (string, error) {
+			return fields["phone"], nil
+		}).
+		Build()
+	require.NoError(t, err)
+
+	fields := map[string]string{"phone": "+14155552671"}
+	err = s.OnEvent(context.Background(), "sms", "hello", fields)
+	require.NoError(t, err)
+	assert.Nil(t, mock.publishInput.TopicArn)
+	assert.Nil(t, mock.publishInput.TargetArn)
+	assert.Equal(t, "+14155552671", *mock.publishInput.PhoneNumber)
+}
+
+func TestOnEvent_DynamicTopic_InvalidTarget(t *testing.T) {
+	mock := &mockSNS{messageID: "msg-1"}
+	s, err := NewSender().
+		WithClient(mock).
+		WithClientName("dynamic").
+		WithTopicFunc(func(topic string, msg any, fields map[string]string) (string, error) {
+			return "not-valid", nil
+		}).
+		Build()
+	require.NoError(t, err)
+
+	err = s.OnEvent(context.Background(), "test", "msg", nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "unrecognized format")
+	// Should not have called Publish.
+	assert.Nil(t, mock.publishInput)
+}
+
+func TestOnEvent_DynamicTopic_ExpressionError(t *testing.T) {
+	mock := &mockSNS{messageID: "msg-1"}
+	s, err := NewSender().
+		WithClient(mock).
+		WithClientName("dynamic").
+		WithTopicFunc(func(topic string, msg any, fields map[string]string) (string, error) {
+			return "", errors.New("eval failed")
+		}).
+		Build()
+	require.NoError(t, err)
+
+	err = s.OnEvent(context.Background(), "test", "msg", nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "eval failed")
+	assert.Nil(t, mock.publishInput)
+}
+
+func TestOnEvent_Passthrough(t *testing.T) {
+	mock := &mockSNS{messageID: "msg-1"}
+	s, err := NewSender().
+		WithClient(mock).
+		WithClientName("passthrough").
+		WithPassthrough().
+		Build()
+	require.NoError(t, err)
+
+	// Vinculum topic IS the SNS target — must be a valid ARN.
+	err = s.OnEvent(context.Background(), "arn:aws:sns:us-east-1:123456789012:events", "msg", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "arn:aws:sns:us-east-1:123456789012:events", *mock.publishInput.TopicArn)
+}
+
+func TestOnEvent_Passthrough_InvalidTopic(t *testing.T) {
+	mock := &mockSNS{messageID: "msg-1"}
+	s, err := NewSender().
+		WithClient(mock).
+		WithClientName("passthrough").
+		WithPassthrough().
+		Build()
+	require.NoError(t, err)
+
+	err = s.OnEvent(context.Background(), "not/a/valid/arn", "msg", nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "unrecognized format")
+}
+
+func TestOnEvent_SubjectFunc(t *testing.T) {
+	mock := &mockSNS{messageID: "msg-1"}
+	s, err := NewSender().
+		WithClient(mock).
+		WithClientName("test").
+		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:alerts").
+		WithSubjectFunc(func(topic string, msg any, fields map[string]string) (string, error) {
+			return "Alert: " + topic, nil
+		}).
+		Build()
+	require.NoError(t, err)
+
+	err = s.OnEvent(context.Background(), "cpu/high", "msg", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "Alert: cpu/high", *mock.publishInput.Subject)
+}
+
+func TestOnEvent_SubjectFieldOverridesFunc(t *testing.T) {
+	mock := &mockSNS{messageID: "msg-1"}
+	s, err := NewSender().
+		WithClient(mock).
+		WithClientName("test").
+		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:alerts").
+		WithSubjectFunc(func(topic string, msg any, fields map[string]string) (string, error) {
+			return "default subject", nil
+		}).
+		Build()
+	require.NoError(t, err)
+
+	fields := map[string]string{"$Subject": "override subject"}
+	err = s.OnEvent(context.Background(), "test", "msg", fields)
+	require.NoError(t, err)
+	assert.Equal(t, "override subject", *mock.publishInput.Subject)
+}
+
+func TestOnEvent_SubjectFuncError(t *testing.T) {
+	mock := &mockSNS{messageID: "msg-1"}
+	s, err := NewSender().
+		WithClient(mock).
+		WithClientName("test").
+		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:alerts").
+		WithSubjectFunc(func(topic string, msg any, fields map[string]string) (string, error) {
+			return "", errors.New("subject eval failed")
+		}).
+		Build()
+	require.NoError(t, err)
+
+	err = s.OnEvent(context.Background(), "test", "msg", nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "subject eval failed")
+}
+
+func TestOnEvent_MessageStructureConfig(t *testing.T) {
+	mock := &mockSNS{messageID: "msg-1"}
+	s, err := NewSender().
+		WithClient(mock).
+		WithClientName("test").
+		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:alerts").
+		WithMessageStructure("json").
+		Build()
+	require.NoError(t, err)
+
+	err = s.OnEvent(context.Background(), "test", `{"default":"hi"}`, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "json", *mock.publishInput.MessageStructure)
+}
+
+func TestOnEvent_MessageStructureFieldOverridesConfig(t *testing.T) {
+	mock := &mockSNS{messageID: "msg-1"}
+	s, err := NewSender().
+		WithClient(mock).
+		WithClientName("test").
+		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:alerts").
+		WithMessageStructure("json").
+		Build()
+	require.NoError(t, err)
+
+	// $MessageStructure field overrides config.
+	fields := map[string]string{"$MessageStructure": "raw"}
+	err = s.OnEvent(context.Background(), "test", "msg", fields)
+	require.NoError(t, err)
+	assert.Equal(t, "raw", *mock.publishInput.MessageStructure)
+}
+
+func TestBuilder_MultipleTargetModes(t *testing.T) {
+	mock := &mockSNS{}
+
+	// Static + passthrough = error.
+	_, err := NewSender().
+		WithClient(mock).
+		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:alerts").
+		WithPassthrough().
+		Build()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "only one target mode")
+
+	// Static + topicFn = error.
+	_, err = NewSender().
+		WithClient(mock).
+		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:alerts").
+		WithTopicFunc(func(string, any, map[string]string) (string, error) { return "", nil }).
+		Build()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "only one target mode")
+
+	// No target = error.
+	_, err = NewSender().
+		WithClient(mock).
+		WithClientName("test").
+		Build()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "target is required")
 }

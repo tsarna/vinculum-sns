@@ -14,6 +14,10 @@ type SenderBuilder struct {
 	client         SNSPublishAPI
 	clientName     string
 	staticTarget   string
+	topicFn        TopicFunc
+	passthrough    bool
+	subjectFn      SubjectFunc
+	msgStructure   string
 	wireFormat     wire.WireFormat
 	topicAttribute string
 	meterProvider  metric.MeterProvider
@@ -40,6 +44,26 @@ func (b *SenderBuilder) WithClientName(name string) *SenderBuilder {
 
 func (b *SenderBuilder) WithStaticTarget(target string) *SenderBuilder {
 	b.staticTarget = target
+	return b
+}
+
+func (b *SenderBuilder) WithTopicFunc(fn TopicFunc) *SenderBuilder {
+	b.topicFn = fn
+	return b
+}
+
+func (b *SenderBuilder) WithPassthrough() *SenderBuilder {
+	b.passthrough = true
+	return b
+}
+
+func (b *SenderBuilder) WithSubjectFunc(fn SubjectFunc) *SenderBuilder {
+	b.subjectFn = fn
+	return b
+}
+
+func (b *SenderBuilder) WithMessageStructure(ms string) *SenderBuilder {
+	b.msgStructure = ms
 	return b
 }
 
@@ -75,14 +99,39 @@ func (b *SenderBuilder) Build() (*SNSSender, error) {
 	if b.client == nil {
 		return nil, errors.New("sns sender: client is required")
 	}
-	if b.staticTarget == "" {
-		return nil, errors.New("sns sender: target is required")
+
+	// Validate exactly one target mode is configured.
+	modes := 0
+	if b.staticTarget != "" {
+		modes++
+	}
+	if b.topicFn != nil {
+		modes++
+	}
+	if b.passthrough {
+		modes++
+	}
+	if modes == 0 {
+		return nil, errors.New("sns sender: target is required (use WithStaticTarget, WithTopicFunc, or WithPassthrough)")
+	}
+	if modes > 1 {
+		return nil, errors.New("sns sender: only one target mode allowed (static, topic func, or passthrough)")
 	}
 
-	// Resolve and validate the static target.
-	property, name, err := ResolveTarget(b.staticTarget)
-	if err != nil {
-		return nil, err
+	var (
+		staticTarget  string
+		topicProperty string
+		topicName     string
+	)
+
+	if b.staticTarget != "" {
+		// Resolve and validate the static target.
+		var err error
+		topicProperty, topicName, err = ResolveTarget(b.staticTarget)
+		if err != nil {
+			return nil, err
+		}
+		staticTarget = b.staticTarget
 	}
 
 	wf := b.wireFormat
@@ -94,11 +143,15 @@ func (b *SenderBuilder) Build() (*SNSSender, error) {
 		client:         b.client,
 		clientName:     b.clientName,
 		wireFormat:     wf,
-		staticTarget:   b.staticTarget,
-		topicProperty:  property,
-		topicName:      name,
+		staticTarget:   staticTarget,
+		topicProperty:  topicProperty,
+		topicName:      topicName,
+		topicFn:        b.topicFn,
+		passthrough:    b.passthrough,
+		subjectFn:      b.subjectFn,
+		msgStructure:   b.msgStructure,
 		topicAttribute: b.topicAttribute,
-		metrics:        NewSenderMetrics(b.clientName, name, b.meterProvider),
+		metrics:        NewSenderMetrics(b.clientName, b.meterProvider),
 		logger:         b.logger,
 		tracerProvider: b.tracerProvider,
 	}, nil
