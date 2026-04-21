@@ -46,13 +46,17 @@ type SNSPublishAPI interface {
 	Publish(ctx context.Context, params *sns.PublishInput, optFns ...func(*sns.Options)) (*sns.PublishOutput, error)
 }
 
-// TopicFunc resolves the SNS target value per message. It receives the
-// vinculum topic, message, and fields, and returns the target value string
-// (an ARN or phone number).
-type TopicFunc func(topic string, msg any, fields map[string]string) (string, error)
+// HookContext is an opaque per-message evaluation context built once and
+// shared across all hook evaluations within a single OnEvent call. The
+// concrete type is determined by the VCL wiring layer (e.g. *hcl.EvalContext).
+type HookContext = any
 
-// SubjectFunc resolves the SNS Subject per message.
-type SubjectFunc func(topic string, msg any, fields map[string]string) (string, error)
+// MakeHookContextFunc builds a HookContext for the current message.
+// Called at most once per OnEvent, lazily on first hook evaluation.
+type MakeHookContextFunc func(topic string, msg any, fields map[string]string) (HookContext, error)
+
+// HookFunc evaluates a per-message expression using a shared HookContext.
+type HookFunc func(hookCtx HookContext) (string, error)
 
 // SNSSender receives vinculum bus events and publishes them to AWS SNS.
 // It implements bus.Subscriber so it can be used directly as a subscription target.
@@ -65,12 +69,13 @@ type SNSSender struct {
 	staticTarget   string // resolved target value (when constant)
 	topicProperty  string // "TopicArn", "TargetArn", or "PhoneNumber" (when static)
 	topicName      string // human-readable name extracted from ARN (when static)
-	topicFn        TopicFunc // per-message target resolver (nil when static or passthrough)
-	passthrough    bool      // true = use vinculum topic as SNS target value
-	subjectFn      SubjectFunc // per-message subject (nil = no default)
-	msgStructure   string // static message_structure config ("" = omit)
-	topicAttribute string // "" = don't include
+	topicHook      HookFunc // per-message target resolver (nil when static or passthrough)
+	passthrough    bool     // true = use vinculum topic as SNS target value
+	subjectHook    HookFunc // per-message subject (nil = no default)
+	msgStructure   string   // static message_structure config ("" = omit)
+	topicAttribute string   // "" = don't include
 	fifo           *FIFOConfig // nil for standard topics
+	makeHookCtx    MakeHookContextFunc // builds shared eval context (nil when no hooks)
 	metrics        *SenderMetrics
 	logger         *zap.Logger
 	tracerProvider trace.TracerProvider
@@ -82,6 +87,20 @@ func (s *SNSSender) tracer() trace.Tracer {
 		tp = otel.GetTracerProvider()
 	}
 	return tp.Tracer("github.com/tsarna/vinculum-sns/sender")
+}
+
+// evalHook lazily builds the shared HookContext on first use, then
+// evaluates the given hook against it. The hookCtx pointer is shared
+// across all hook evaluations within a single OnEvent call.
+func (s *SNSSender) evalHook(hookCtx *HookContext, hook HookFunc, topic string, msg any, fields map[string]string) (string, error) {
+	if *hookCtx == nil {
+		var err error
+		*hookCtx, err = s.makeHookCtx(topic, msg, fields)
+		if err != nil {
+			return "", err
+		}
+	}
+	return hook(*hookCtx)
 }
 
 // Start is a no-op. Reserved for future use.
@@ -101,16 +120,19 @@ func (s *SNSSender) OnEvent(ctx context.Context, topic string, msg any, fields m
 		return fmt.Errorf("sns sender %s: serialize: %w", s.clientName, err)
 	}
 
+	// Shared hook context — built lazily on first hook evaluation.
+	var hookCtx HookContext
+
 	// Resolve target value and property.
-	targetValue, targetProperty, destName, err := s.resolveTargetForMessage(topic, msg, fields)
+	targetValue, targetProperty, destName, err := s.resolveTargetForMessage(&hookCtx, topic, msg, fields)
 	if err != nil {
 		return fmt.Errorf("sns sender %s: %w", s.clientName, err)
 	}
 
-	// Resolve Subject: $Subject field > subjectFn > omit.
+	// Resolve Subject: $Subject field > subjectHook > omit.
 	subject := extractField(fields, "$Subject")
-	if subject == "" && s.subjectFn != nil {
-		subject, err = s.subjectFn(topic, msg, fields)
+	if subject == "" && s.subjectHook != nil {
+		subject, err = s.evalHook(&hookCtx, s.subjectHook, topic, msg, fields)
 		if err != nil {
 			return fmt.Errorf("sns sender %s: subject: %w", s.clientName, err)
 		}
@@ -146,7 +168,7 @@ func (s *SNSSender) OnEvent(ctx context.Context, topic string, msg any, fields m
 	var messageGroupID *string
 	var messageDeduplicationID *string
 	if s.fifo != nil {
-		groupID, err := s.fifo.GroupIDFunc(topic, msg, fields)
+		groupID, err := s.evalHook(&hookCtx, s.fifo.GroupIDHook, topic, msg, fields)
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
@@ -154,8 +176,8 @@ func (s *SNSSender) OnEvent(ctx context.Context, topic string, msg any, fields m
 		}
 		messageGroupID = &groupID
 
-		if s.fifo.DeduplicationFunc != nil {
-			dedupID, err := s.fifo.DeduplicationFunc(topic, msg, fields)
+		if s.fifo.DeduplicationHook != nil {
+			dedupID, err := s.evalHook(&hookCtx, s.fifo.DeduplicationHook, topic, msg, fields)
 			if err != nil {
 				span.RecordError(err)
 				span.SetStatus(codes.Error, err.Error())
@@ -209,17 +231,17 @@ func (s *SNSSender) OnEvent(ctx context.Context, topic string, msg any, fields m
 }
 
 // resolveTargetForMessage returns the target value, property type, and
-// display name for a message. Uses static target, topicFn, or passthrough.
-func (s *SNSSender) resolveTargetForMessage(topic string, msg any, fields map[string]string) (value, property, name string, err error) {
+// display name for a message. Uses static target, topicHook, or passthrough.
+func (s *SNSSender) resolveTargetForMessage(hookCtx *HookContext, topic string, msg any, fields map[string]string) (value, property, name string, err error) {
 	// Static target (most common path).
 	if s.staticTarget != "" {
 		return s.staticTarget, s.topicProperty, s.topicName, nil
 	}
 
-	// Dynamic target via topicFn or passthrough.
+	// Dynamic target via topicHook or passthrough.
 	var raw string
-	if s.topicFn != nil {
-		raw, err = s.topicFn(topic, msg, fields)
+	if s.topicHook != nil {
+		raw, err = s.evalHook(hookCtx, s.topicHook, topic, msg, fields)
 		if err != nil {
 			return "", "", "", fmt.Errorf("sns_topic expression: %w", err)
 		}

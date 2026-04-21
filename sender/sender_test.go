@@ -27,6 +27,27 @@ func (m *mockSNS) Publish(_ context.Context, params *sns.PublishInput, _ ...func
 	return &sns.PublishOutput{MessageId: &m.messageID}, nil
 }
 
+// testHookCtx is the HookContext used in tests. It carries per-message data
+// so test hooks can access topic, msg, and fields.
+type testHookCtx struct {
+	topic  string
+	msg    any
+	fields map[string]string
+}
+
+// testMakeHookCtx builds a testHookCtx from the per-message data.
+func testMakeHookCtx(topic string, msg any, fields map[string]string) (HookContext, error) {
+	return &testHookCtx{topic: topic, msg: msg, fields: fields}, nil
+}
+
+// testHook creates a HookFunc that extracts testHookCtx and calls fn.
+func testHook(fn func(topic string, msg any, fields map[string]string) (string, error)) HookFunc {
+	return func(hookCtx HookContext) (string, error) {
+		ctx := hookCtx.(*testHookCtx)
+		return fn(ctx.topic, ctx.msg, ctx.fields)
+	}
+}
+
 func buildTestSender(t *testing.T, mock *mockSNS, opts ...func(*SenderBuilder)) *SNSSender {
 	t.Helper()
 	b := NewSender().
@@ -321,9 +342,10 @@ func TestOnEvent_DynamicTopic(t *testing.T) {
 	s, err := NewSender().
 		WithClient(mock).
 		WithClientName("dynamic").
-		WithTopicFunc(func(topic string, msg any, fields map[string]string) (string, error) {
+		WithMakeHookContext(testMakeHookCtx).
+		WithTopicHook(testHook(func(topic string, msg any, fields map[string]string) (string, error) {
 			return "arn:aws:sns:us-east-1:123456789012:" + topic, nil
-		}).
+		})).
 		Build()
 	require.NoError(t, err)
 
@@ -339,9 +361,10 @@ func TestOnEvent_DynamicTopic_TargetArn(t *testing.T) {
 	s, err := NewSender().
 		WithClient(mock).
 		WithClientName("dynamic").
-		WithTopicFunc(func(topic string, msg any, fields map[string]string) (string, error) {
+		WithMakeHookContext(testMakeHookCtx).
+		WithTopicHook(testHook(func(topic string, msg any, fields map[string]string) (string, error) {
 			return "arn:aws:sns:us-east-1:123456789012:endpoint/GCM/myapp/abc123", nil
-		}).
+		})).
 		Build()
 	require.NoError(t, err)
 
@@ -356,9 +379,10 @@ func TestOnEvent_DynamicTopic_PhoneNumber(t *testing.T) {
 	s, err := NewSender().
 		WithClient(mock).
 		WithClientName("dynamic").
-		WithTopicFunc(func(topic string, msg any, fields map[string]string) (string, error) {
+		WithMakeHookContext(testMakeHookCtx).
+		WithTopicHook(testHook(func(topic string, msg any, fields map[string]string) (string, error) {
 			return fields["phone"], nil
-		}).
+		})).
 		Build()
 	require.NoError(t, err)
 
@@ -375,9 +399,10 @@ func TestOnEvent_DynamicTopic_InvalidTarget(t *testing.T) {
 	s, err := NewSender().
 		WithClient(mock).
 		WithClientName("dynamic").
-		WithTopicFunc(func(topic string, msg any, fields map[string]string) (string, error) {
+		WithMakeHookContext(testMakeHookCtx).
+		WithTopicHook(testHook(func(topic string, msg any, fields map[string]string) (string, error) {
 			return "not-valid", nil
-		}).
+		})).
 		Build()
 	require.NoError(t, err)
 
@@ -393,9 +418,10 @@ func TestOnEvent_DynamicTopic_ExpressionError(t *testing.T) {
 	s, err := NewSender().
 		WithClient(mock).
 		WithClientName("dynamic").
-		WithTopicFunc(func(topic string, msg any, fields map[string]string) (string, error) {
+		WithMakeHookContext(testMakeHookCtx).
+		WithTopicHook(testHook(func(topic string, msg any, fields map[string]string) (string, error) {
 			return "", errors.New("eval failed")
-		}).
+		})).
 		Build()
 	require.NoError(t, err)
 
@@ -434,15 +460,16 @@ func TestOnEvent_Passthrough_InvalidTopic(t *testing.T) {
 	assert.Contains(t, err.Error(), "unrecognized format")
 }
 
-func TestOnEvent_SubjectFunc(t *testing.T) {
+func TestOnEvent_SubjectHook(t *testing.T) {
 	mock := &mockSNS{messageID: "msg-1"}
 	s, err := NewSender().
 		WithClient(mock).
 		WithClientName("test").
 		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:alerts").
-		WithSubjectFunc(func(topic string, msg any, fields map[string]string) (string, error) {
+		WithMakeHookContext(testMakeHookCtx).
+		WithSubjectHook(testHook(func(topic string, msg any, fields map[string]string) (string, error) {
 			return "Alert: " + topic, nil
-		}).
+		})).
 		Build()
 	require.NoError(t, err)
 
@@ -451,15 +478,16 @@ func TestOnEvent_SubjectFunc(t *testing.T) {
 	assert.Equal(t, "Alert: cpu/high", *mock.publishInput.Subject)
 }
 
-func TestOnEvent_SubjectFieldOverridesFunc(t *testing.T) {
+func TestOnEvent_SubjectFieldOverridesHook(t *testing.T) {
 	mock := &mockSNS{messageID: "msg-1"}
 	s, err := NewSender().
 		WithClient(mock).
 		WithClientName("test").
 		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:alerts").
-		WithSubjectFunc(func(topic string, msg any, fields map[string]string) (string, error) {
+		WithMakeHookContext(testMakeHookCtx).
+		WithSubjectHook(testHook(func(topic string, msg any, fields map[string]string) (string, error) {
 			return "default subject", nil
-		}).
+		})).
 		Build()
 	require.NoError(t, err)
 
@@ -469,15 +497,16 @@ func TestOnEvent_SubjectFieldOverridesFunc(t *testing.T) {
 	assert.Equal(t, "override subject", *mock.publishInput.Subject)
 }
 
-func TestOnEvent_SubjectFuncError(t *testing.T) {
+func TestOnEvent_SubjectHookError(t *testing.T) {
 	mock := &mockSNS{messageID: "msg-1"}
 	s, err := NewSender().
 		WithClient(mock).
 		WithClientName("test").
 		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:alerts").
-		WithSubjectFunc(func(topic string, msg any, fields map[string]string) (string, error) {
+		WithMakeHookContext(testMakeHookCtx).
+		WithSubjectHook(testHook(func(topic string, msg any, fields map[string]string) (string, error) {
 			return "", errors.New("subject eval failed")
-		}).
+		})).
 		Build()
 	require.NoError(t, err)
 
@@ -530,11 +559,11 @@ func TestBuilder_MultipleTargetModes(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "only one target mode")
 
-	// Static + topicFn = error.
+	// Static + topicHook = error.
 	_, err = NewSender().
 		WithClient(mock).
 		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:alerts").
-		WithTopicFunc(func(string, any, map[string]string) (string, error) { return "", nil }).
+		WithTopicHook(func(HookContext) (string, error) { return "", nil }).
 		Build()
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "only one target mode")
@@ -556,10 +585,11 @@ func TestOnEvent_FIFO_GroupID(t *testing.T) {
 		WithClient(mock).
 		WithClientName("test").
 		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:orders.fifo").
+		WithMakeHookContext(testMakeHookCtx).
 		WithFIFOConfig(&FIFOConfig{
-			GroupIDFunc: func(topic string, msg any, fields map[string]string) (string, error) {
+			GroupIDHook: testHook(func(topic string, msg any, fields map[string]string) (string, error) {
 				return topic, nil
-			},
+			}),
 		}).
 		Build()
 	require.NoError(t, err)
@@ -576,13 +606,14 @@ func TestOnEvent_FIFO_GroupIDAndDedup(t *testing.T) {
 		WithClient(mock).
 		WithClientName("test").
 		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:orders.fifo").
+		WithMakeHookContext(testMakeHookCtx).
 		WithFIFOConfig(&FIFOConfig{
-			GroupIDFunc: func(topic string, msg any, fields map[string]string) (string, error) {
+			GroupIDHook: testHook(func(topic string, msg any, fields map[string]string) (string, error) {
 				return "group-1", nil
-			},
-			DeduplicationFunc: func(topic string, msg any, fields map[string]string) (string, error) {
+			}),
+			DeduplicationHook: testHook(func(topic string, msg any, fields map[string]string) (string, error) {
 				return fields["event_id"], nil
-			},
+			}),
 		}).
 		Build()
 	require.NoError(t, err)
@@ -600,10 +631,11 @@ func TestOnEvent_FIFO_GroupIDError(t *testing.T) {
 		WithClient(mock).
 		WithClientName("test").
 		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:orders.fifo").
+		WithMakeHookContext(testMakeHookCtx).
 		WithFIFOConfig(&FIFOConfig{
-			GroupIDFunc: func(topic string, msg any, fields map[string]string) (string, error) {
+			GroupIDHook: testHook(func(topic string, msg any, fields map[string]string) (string, error) {
 				return "", errors.New("group id eval failed")
-			},
+			}),
 		}).
 		Build()
 	require.NoError(t, err)
@@ -621,13 +653,14 @@ func TestOnEvent_FIFO_DeduplicationError(t *testing.T) {
 		WithClient(mock).
 		WithClientName("test").
 		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:orders.fifo").
+		WithMakeHookContext(testMakeHookCtx).
 		WithFIFOConfig(&FIFOConfig{
-			GroupIDFunc: func(topic string, msg any, fields map[string]string) (string, error) {
+			GroupIDHook: testHook(func(topic string, msg any, fields map[string]string) (string, error) {
 				return "group-1", nil
-			},
-			DeduplicationFunc: func(topic string, msg any, fields map[string]string) (string, error) {
+			}),
+			DeduplicationHook: testHook(func(topic string, msg any, fields map[string]string) (string, error) {
 				return "", errors.New("dedup eval failed")
-			},
+			}),
 		}).
 		Build()
 	require.NoError(t, err)
@@ -651,7 +684,7 @@ func TestBuilder_FIFO_RequiresGroupID(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "FIFO topic requires message_group_id")
 
-	// .fifo topic with FIFOConfig but nil GroupIDFunc = error.
+	// .fifo topic with FIFOConfig but nil GroupIDHook = error.
 	_, err = NewSender().
 		WithClient(mock).
 		WithClientName("test").
@@ -666,8 +699,9 @@ func TestBuilder_FIFO_RequiresGroupID(t *testing.T) {
 		WithClient(mock).
 		WithClientName("test").
 		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:orders").
+		WithMakeHookContext(testMakeHookCtx).
 		WithFIFOConfig(&FIFOConfig{
-			GroupIDFunc: func(string, any, map[string]string) (string, error) { return "g", nil },
+			GroupIDHook: testHook(func(string, any, map[string]string) (string, error) { return "g", nil }),
 		}).
 		Build()
 	require.NoError(t, err)

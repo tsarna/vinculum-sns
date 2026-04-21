@@ -9,10 +9,10 @@ import (
 	"go.uber.org/zap"
 )
 
-// FIFOConfig holds the per-message functions for FIFO topic parameters.
+// FIFOConfig holds the per-message hooks for FIFO topic parameters.
 type FIFOConfig struct {
-	GroupIDFunc       func(topic string, msg any, fields map[string]string) (string, error)
-	DeduplicationFunc func(topic string, msg any, fields map[string]string) (string, error) // nil = use topic's content-based dedup
+	GroupIDHook       HookFunc // required for FIFO topics
+	DeduplicationHook HookFunc // nil = use topic's content-based dedup
 }
 
 // SenderBuilder constructs an SNSSender with validated configuration.
@@ -20,13 +20,14 @@ type SenderBuilder struct {
 	client         SNSPublishAPI
 	clientName     string
 	staticTarget   string
-	topicFn        TopicFunc
+	topicHook      HookFunc
 	passthrough    bool
-	subjectFn      SubjectFunc
+	subjectHook    HookFunc
 	msgStructure   string
 	wireFormat     wire.WireFormat
 	topicAttribute string
 	fifo           *FIFOConfig
+	makeHookCtx    MakeHookContextFunc
 	meterProvider  metric.MeterProvider
 	logger         *zap.Logger
 	tracerProvider trace.TracerProvider
@@ -54,8 +55,8 @@ func (b *SenderBuilder) WithStaticTarget(target string) *SenderBuilder {
 	return b
 }
 
-func (b *SenderBuilder) WithTopicFunc(fn TopicFunc) *SenderBuilder {
-	b.topicFn = fn
+func (b *SenderBuilder) WithTopicHook(fn HookFunc) *SenderBuilder {
+	b.topicHook = fn
 	return b
 }
 
@@ -64,8 +65,13 @@ func (b *SenderBuilder) WithPassthrough() *SenderBuilder {
 	return b
 }
 
-func (b *SenderBuilder) WithSubjectFunc(fn SubjectFunc) *SenderBuilder {
-	b.subjectFn = fn
+func (b *SenderBuilder) WithSubjectHook(fn HookFunc) *SenderBuilder {
+	b.subjectHook = fn
+	return b
+}
+
+func (b *SenderBuilder) WithMakeHookContext(fn MakeHookContextFunc) *SenderBuilder {
+	b.makeHookCtx = fn
 	return b
 }
 
@@ -117,17 +123,17 @@ func (b *SenderBuilder) Build() (*SNSSender, error) {
 	if b.staticTarget != "" {
 		modes++
 	}
-	if b.topicFn != nil {
+	if b.topicHook != nil {
 		modes++
 	}
 	if b.passthrough {
 		modes++
 	}
 	if modes == 0 {
-		return nil, errors.New("sns sender: target is required (use WithStaticTarget, WithTopicFunc, or WithPassthrough)")
+		return nil, errors.New("sns sender: target is required (use WithStaticTarget, WithTopicHook, or WithPassthrough)")
 	}
 	if modes > 1 {
-		return nil, errors.New("sns sender: only one target mode allowed (static, topic func, or passthrough)")
+		return nil, errors.New("sns sender: only one target mode allowed (static, topic hook, or passthrough)")
 	}
 
 	var (
@@ -146,7 +152,7 @@ func (b *SenderBuilder) Build() (*SNSSender, error) {
 		staticTarget = b.staticTarget
 
 		// FIFO validation: .fifo topics require message_group_id.
-		if IsFIFOTopic(staticTarget) && (b.fifo == nil || b.fifo.GroupIDFunc == nil) {
+		if IsFIFOTopic(staticTarget) && (b.fifo == nil || b.fifo.GroupIDHook == nil) {
 			return nil, errors.New("sns sender: FIFO topic requires message_group_id (topic ARN ends in .fifo)")
 		}
 	}
@@ -156,6 +162,13 @@ func (b *SenderBuilder) Build() (*SNSSender, error) {
 		wf = wire.Auto
 	}
 
+	makeHookCtx := b.makeHookCtx
+	if makeHookCtx == nil {
+		makeHookCtx = func(string, any, map[string]string) (HookContext, error) {
+			return nil, nil
+		}
+	}
+
 	return &SNSSender{
 		client:         b.client,
 		clientName:     b.clientName,
@@ -163,12 +176,13 @@ func (b *SenderBuilder) Build() (*SNSSender, error) {
 		staticTarget:   staticTarget,
 		topicProperty:  topicProperty,
 		topicName:      topicName,
-		topicFn:        b.topicFn,
+		topicHook:      b.topicHook,
 		passthrough:    b.passthrough,
-		subjectFn:      b.subjectFn,
+		subjectHook:    b.subjectHook,
 		msgStructure:   b.msgStructure,
 		topicAttribute: b.topicAttribute,
 		fifo:           b.fifo,
+		makeHookCtx:    makeHookCtx,
 		metrics:        NewSenderMetrics(b.clientName, b.meterProvider),
 		logger:         b.logger,
 		tracerProvider: b.tracerProvider,
