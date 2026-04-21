@@ -84,10 +84,10 @@ func (s *SNSSender) tracer() trace.Tracer {
 	return tp.Tracer("github.com/tsarna/vinculum-sns/sender")
 }
 
-// Start starts the batcher if batching is enabled. No-op for now.
+// Start is a no-op. Reserved for future use.
 func (s *SNSSender) Start() {}
 
-// Stop stops the batcher if batching is enabled. No-op for now.
+// Stop is a no-op. Reserved for future use.
 func (s *SNSSender) Stop() {}
 
 // OnEvent serializes the message, maps fields to SNS message attributes,
@@ -142,10 +142,35 @@ func (s *SNSSender) OnEvent(ctx context.Context, topic string, msg any, fields m
 	)
 	defer span.End()
 
+	// FIFO topic parameters.
+	var messageGroupID *string
+	var messageDeduplicationID *string
+	if s.fifo != nil {
+		groupID, err := s.fifo.GroupIDFunc(topic, msg, fields)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return fmt.Errorf("sns sender %s: message_group_id: %w", s.clientName, err)
+		}
+		messageGroupID = &groupID
+
+		if s.fifo.DeduplicationFunc != nil {
+			dedupID, err := s.fifo.DeduplicationFunc(topic, msg, fields)
+			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+				return fmt.Errorf("sns sender %s: deduplication_id: %w", s.clientName, err)
+			}
+			messageDeduplicationID = &dedupID
+		}
+	}
+
 	// Build publish input.
 	input := &sns.PublishInput{
-		Message:           &body,
-		MessageAttributes: attrs,
+		Message:                &body,
+		MessageAttributes:      attrs,
+		MessageGroupId:         messageGroupID,
+		MessageDeduplicationId: messageDeduplicationID,
 	}
 
 	// Set target property.
@@ -164,27 +189,6 @@ func (s *SNSSender) OnEvent(ctx context.Context, topic string, msg any, fields m
 	}
 	if msgStructure != "" {
 		input.MessageStructure = &msgStructure
-	}
-
-	// FIFO topic parameters.
-	if s.fifo != nil {
-		groupID, err := s.fifo.GroupIDFunc(topic, msg, fields)
-		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-			return fmt.Errorf("sns sender %s: message_group_id: %w", s.clientName, err)
-		}
-		input.MessageGroupId = &groupID
-
-		if s.fifo.DeduplicationFunc != nil {
-			dedupID, err := s.fifo.DeduplicationFunc(topic, msg, fields)
-			if err != nil {
-				span.RecordError(err)
-				span.SetStatus(codes.Error, err.Error())
-				return fmt.Errorf("sns sender %s: deduplication_id: %w", s.clientName, err)
-			}
-			input.MessageDeduplicationId = &dedupID
-		}
 	}
 
 	// Publish.

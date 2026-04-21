@@ -20,9 +20,8 @@ Implements `bus.Subscriber`. `OnEvent` serializes the payload, maps vinculum fie
 - SNS attribute name validation and 10-attribute budget enforcement
 - Auto-detection of SNS target type from value: TopicArn, TargetArn, or PhoneNumber
 - FIFO topic support: per-message `MessageGroupId` and `MessageDeduplicationId` via configurable functions
-- Batching via `PublishBatch` with configurable max size (1--10) and max delay
 - W3C trace context propagation (inject into message attributes)
-- OTel metrics instrumentation (sent count, operation duration, batch size)
+- OTel metrics instrumentation (sent count, operation duration)
 
 **Builder example:**
 
@@ -36,14 +35,11 @@ sender, err := sender.NewSender().
     WithMeterProvider(mp).
     WithLogger(logger).
     Build()
-
-sender.Start() // starts batcher goroutine (no-op if batching disabled)
-defer sender.Stop()
 ```
 
 ### Root package -- shared types
 
-`MessageAttributeCarrier` implements `propagation.TextMapCarrier` backed by SNS message attributes, used by the sender (inject) for W3C trace context propagation. SNS forwards message attributes to SQS subscribers, so trace context carries through the SNS → SQS path.
+`MessageAttributeCarrier` implements `propagation.TextMapCarrier` backed by SNS message attributes, used by the sender (inject) for W3C trace context propagation. SNS forwards message attributes to SQS subscribers, so trace context carries through the SNS -> SQS path.
 
 ---
 
@@ -52,10 +48,9 @@ defer sender.Stop()
 The sender exposes instrumentation via an OTel `metric.MeterProvider`. Pass `nil` to disable metrics (all methods are nil-safe).
 
 | Metric | Type | Unit | Description |
-|--------|------|------|-------------|
+| ------ | ---- | ---- | ----------- |
 | `messaging.client.sent.messages` | Int64Counter | `{message}` | Messages published |
-| `messaging.client.operation.duration` | Float64Histogram | `s` | Publish / PublishBatch latency |
-| `messaging.batch.message_count` | Float64Histogram | `{message}` | Messages per batch (when batching enabled) |
+| `messaging.client.operation.duration` | Float64Histogram | `s` | Publish latency |
 
 All metrics and trace spans carry attributes: `messaging.system=aws_sns`, `messaging.destination.name=<topic>`, `vinculum.client.name=<client>`.
 

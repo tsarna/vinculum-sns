@@ -14,7 +14,6 @@ import (
 type SenderMetrics struct {
 	messagesSent      metric.Int64Counter
 	operationDuration metric.Float64Histogram
-	batchMessageCount metric.Float64Histogram
 	baseAttrs         metric.MeasurementOption
 }
 
@@ -34,14 +33,9 @@ func NewSenderMetrics(clientName string, mp metric.MeterProvider) *SenderMetrics
 		metric.WithUnit("s"),
 		metric.WithDescription("Duration of SNS publish operations"),
 	)
-	batchSize, _ := meter.Float64Histogram("messaging.batch.message_count",
-		metric.WithUnit("{message}"),
-		metric.WithDescription("Messages per SNS batch publish"),
-	)
 	return &SenderMetrics{
 		messagesSent:      sent,
 		operationDuration: duration,
-		batchMessageCount: batchSize,
 		baseAttrs: metric.WithAttributes(
 			attribute.String("messaging.system", "aws_sns"),
 			attribute.String("vinculum.client.name", clientName),
@@ -65,11 +59,4 @@ func (m *SenderMetrics) RecordOperationDuration(ctx context.Context, d time.Dura
 		return
 	}
 	m.operationDuration.Record(ctx, d.Seconds(), m.baseAttrs, topicAttr(destName))
-}
-
-func (m *SenderMetrics) RecordBatchSize(ctx context.Context, size int, destName string) {
-	if m == nil {
-		return
-	}
-	m.batchMessageCount.Record(ctx, float64(size), m.baseAttrs, topicAttr(destName))
 }

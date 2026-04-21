@@ -2,7 +2,6 @@ package sender
 
 import (
 	"errors"
-	"time"
 
 	wire "github.com/tsarna/vinculum-wire"
 	"go.opentelemetry.io/otel/metric"
@@ -14,12 +13,6 @@ import (
 type FIFOConfig struct {
 	GroupIDFunc       func(topic string, msg any, fields map[string]string) (string, error)
 	DeduplicationFunc func(topic string, msg any, fields map[string]string) (string, error) // nil = use topic's content-based dedup
-}
-
-// BatchConfig holds batching parameters.
-type BatchConfig struct {
-	MaxSize  int
-	MaxDelay time.Duration
 }
 
 // SenderBuilder constructs an SNSSender with validated configuration.
@@ -34,7 +27,6 @@ type SenderBuilder struct {
 	wireFormat     wire.WireFormat
 	topicAttribute string
 	fifo           *FIFOConfig
-	batchConfig    *BatchConfig
 	meterProvider  metric.MeterProvider
 	logger         *zap.Logger
 	tracerProvider trace.TracerProvider
@@ -84,11 +76,6 @@ func (b *SenderBuilder) WithMessageStructure(ms string) *SenderBuilder {
 
 func (b *SenderBuilder) WithFIFOConfig(cfg *FIFOConfig) *SenderBuilder {
 	b.fifo = cfg
-	return b
-}
-
-func (b *SenderBuilder) WithBatchConfig(cfg *BatchConfig) *SenderBuilder {
-	b.batchConfig = cfg
 	return b
 }
 
