@@ -70,6 +70,7 @@ type SNSSender struct {
 	subjectFn      SubjectFunc // per-message subject (nil = no default)
 	msgStructure   string // static message_structure config ("" = omit)
 	topicAttribute string // "" = don't include
+	fifo           *FIFOConfig // nil for standard topics
 	metrics        *SenderMetrics
 	logger         *zap.Logger
 	tracerProvider trace.TracerProvider
@@ -163,6 +164,27 @@ func (s *SNSSender) OnEvent(ctx context.Context, topic string, msg any, fields m
 	}
 	if msgStructure != "" {
 		input.MessageStructure = &msgStructure
+	}
+
+	// FIFO topic parameters.
+	if s.fifo != nil {
+		groupID, err := s.fifo.GroupIDFunc(topic, msg, fields)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return fmt.Errorf("sns sender %s: message_group_id: %w", s.clientName, err)
+		}
+		input.MessageGroupId = &groupID
+
+		if s.fifo.DeduplicationFunc != nil {
+			dedupID, err := s.fifo.DeduplicationFunc(topic, msg, fields)
+			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+				return fmt.Errorf("sns sender %s: deduplication_id: %w", s.clientName, err)
+			}
+			input.MessageDeduplicationId = &dedupID
+		}
 	}
 
 	// Publish.

@@ -547,3 +547,129 @@ func TestBuilder_MultipleTargetModes(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "target is required")
 }
+
+// --- Phase 4: FIFO support ---
+
+func TestOnEvent_FIFO_GroupID(t *testing.T) {
+	mock := &mockSNS{messageID: "msg-1"}
+	s, err := NewSender().
+		WithClient(mock).
+		WithClientName("test").
+		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:orders.fifo").
+		WithFIFOConfig(&FIFOConfig{
+			GroupIDFunc: func(topic string, msg any, fields map[string]string) (string, error) {
+				return topic, nil
+			},
+		}).
+		Build()
+	require.NoError(t, err)
+
+	err = s.OnEvent(context.Background(), "order/123", "msg", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "order/123", *mock.publishInput.MessageGroupId)
+	assert.Nil(t, mock.publishInput.MessageDeduplicationId)
+}
+
+func TestOnEvent_FIFO_GroupIDAndDedup(t *testing.T) {
+	mock := &mockSNS{messageID: "msg-1"}
+	s, err := NewSender().
+		WithClient(mock).
+		WithClientName("test").
+		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:orders.fifo").
+		WithFIFOConfig(&FIFOConfig{
+			GroupIDFunc: func(topic string, msg any, fields map[string]string) (string, error) {
+				return "group-1", nil
+			},
+			DeduplicationFunc: func(topic string, msg any, fields map[string]string) (string, error) {
+				return fields["event_id"], nil
+			},
+		}).
+		Build()
+	require.NoError(t, err)
+
+	fields := map[string]string{"event_id": "evt-abc"}
+	err = s.OnEvent(context.Background(), "order/created", "msg", fields)
+	require.NoError(t, err)
+	assert.Equal(t, "group-1", *mock.publishInput.MessageGroupId)
+	assert.Equal(t, "evt-abc", *mock.publishInput.MessageDeduplicationId)
+}
+
+func TestOnEvent_FIFO_GroupIDError(t *testing.T) {
+	mock := &mockSNS{messageID: "msg-1"}
+	s, err := NewSender().
+		WithClient(mock).
+		WithClientName("test").
+		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:orders.fifo").
+		WithFIFOConfig(&FIFOConfig{
+			GroupIDFunc: func(topic string, msg any, fields map[string]string) (string, error) {
+				return "", errors.New("group id eval failed")
+			},
+		}).
+		Build()
+	require.NoError(t, err)
+
+	err = s.OnEvent(context.Background(), "test", "msg", nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "message_group_id")
+	assert.Contains(t, err.Error(), "group id eval failed")
+	assert.Nil(t, mock.publishInput)
+}
+
+func TestOnEvent_FIFO_DeduplicationError(t *testing.T) {
+	mock := &mockSNS{messageID: "msg-1"}
+	s, err := NewSender().
+		WithClient(mock).
+		WithClientName("test").
+		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:orders.fifo").
+		WithFIFOConfig(&FIFOConfig{
+			GroupIDFunc: func(topic string, msg any, fields map[string]string) (string, error) {
+				return "group-1", nil
+			},
+			DeduplicationFunc: func(topic string, msg any, fields map[string]string) (string, error) {
+				return "", errors.New("dedup eval failed")
+			},
+		}).
+		Build()
+	require.NoError(t, err)
+
+	err = s.OnEvent(context.Background(), "test", "msg", nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "deduplication_id")
+	assert.Contains(t, err.Error(), "dedup eval failed")
+	assert.Nil(t, mock.publishInput)
+}
+
+func TestBuilder_FIFO_RequiresGroupID(t *testing.T) {
+	mock := &mockSNS{}
+
+	// .fifo topic without FIFOConfig = error.
+	_, err := NewSender().
+		WithClient(mock).
+		WithClientName("test").
+		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:orders.fifo").
+		Build()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "FIFO topic requires message_group_id")
+
+	// .fifo topic with FIFOConfig but nil GroupIDFunc = error.
+	_, err = NewSender().
+		WithClient(mock).
+		WithClientName("test").
+		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:orders.fifo").
+		WithFIFOConfig(&FIFOConfig{}).
+		Build()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "FIFO topic requires message_group_id")
+
+	// Non-FIFO topic with FIFOConfig is allowed (no validation error).
+	s, err := NewSender().
+		WithClient(mock).
+		WithClientName("test").
+		WithStaticTarget("arn:aws:sns:us-east-1:123456789012:orders").
+		WithFIFOConfig(&FIFOConfig{
+			GroupIDFunc: func(string, any, map[string]string) (string, error) { return "g", nil },
+		}).
+		Build()
+	require.NoError(t, err)
+	assert.NotNil(t, s)
+}

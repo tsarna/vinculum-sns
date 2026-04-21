@@ -157,6 +157,11 @@ func (b *SenderBuilder) Build() (*SNSSender, error) {
 			return nil, err
 		}
 		staticTarget = b.staticTarget
+
+		// FIFO validation: .fifo topics require message_group_id.
+		if IsFIFOTopic(staticTarget) && (b.fifo == nil || b.fifo.GroupIDFunc == nil) {
+			return nil, errors.New("sns sender: FIFO topic requires message_group_id (topic ARN ends in .fifo)")
+		}
 	}
 
 	wf := b.wireFormat
@@ -176,6 +181,7 @@ func (b *SenderBuilder) Build() (*SNSSender, error) {
 		subjectFn:      b.subjectFn,
 		msgStructure:   b.msgStructure,
 		topicAttribute: b.topicAttribute,
+		fifo:           b.fifo,
 		metrics:        NewSenderMetrics(b.clientName, b.meterProvider),
 		logger:         b.logger,
 		tracerProvider: b.tracerProvider,
