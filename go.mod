@@ -3,7 +3,7 @@ module github.com/tsarna/vinculum-sns
 go 1.25.8
 
 require (
-	github.com/aws/aws-sdk-go-v2 v1.43.6
+	github.com/aws/aws-sdk-go-v2 v1.43.7
 	github.com/aws/aws-sdk-go-v2/service/sns v1.42.6
 	github.com/stretchr/testify v1.12.1
 	github.com/tsarna/vinculum-bus v0.16.0
