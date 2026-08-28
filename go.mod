@@ -3,8 +3,8 @@ module github.com/tsarna/vinculum-sns
 go 1.25.8
 
 require (
-	github.com/aws/aws-sdk-go-v2 v1.44.0
-	github.com/aws/aws-sdk-go-v2/service/sns v1.42.8
+	github.com/aws/aws-sdk-go-v2 v1.45.1
+	github.com/aws/aws-sdk-go-v2/service/sns v1.44.1
 	github.com/stretchr/testify v1.12.1
 	github.com/tsarna/vinculum-bus v0.16.0
 	github.com/tsarna/vinculum-wire v0.5.0
@@ -16,8 +16,8 @@ require (
 
 require (
 	github.com/amir-yaghoubi/mqttpattern v0.0.0-20250829083210-f7d8d46a786e // indirect
-	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.39 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.39 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.1 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.1 // indirect
 	github.com/aws/smithy-go v1.28.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
