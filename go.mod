@@ -6,7 +6,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.45.1
 	github.com/aws/aws-sdk-go-v2/service/sns v1.44.1
 	github.com/stretchr/testify v1.12.1
-	github.com/tsarna/vinculum-bus v0.16.0
+	github.com/tsarna/vinculum-bus v0.18.0
 	github.com/tsarna/vinculum-wire v0.5.0
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/metric v1.46.0
